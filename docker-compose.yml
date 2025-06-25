@@ -1,0 +1,20 @@
+version: '3'
+services:
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    container_name: redis
+
+  workerman:
+    build:
+      context: .
+    ports:
+      - "2346:2346"
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: php ws-server.php start
+    depends_on:
+      - redis
+    container_name: workerman

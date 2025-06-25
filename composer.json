@@ -1,0 +1,7 @@
+{
+  "require": {
+    "workerman/workerman": "^4.1",
+    "predis/predis": "^2.1",
+    "workerman/redis": "^2.0"
+  }
+}
