@@ -1,14 +1,63 @@
-version: '3'
+version: '3.8'
+
 services:
+
+  # ─── Nginx - Web Server / Reverse Proxy ────────────────────────────
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ../LaravelBackend:/var/www/html:ro   # ← 改成你的 Laravel 路徑
+      - ../VueFrontend/dist:/var/www/vue/dist:ro  # ← 改成你的 Vue dist 路徑
+    depends_on:
+      - php-fpm
+    restart: unless-stopped
+
+  # ─── PHP-FPM - 執行 Laravel ────────────────────────────────────────
+  php-fpm:
+    build:
+      context: ./php
+    container_name: php-fpm
+    volumes:
+      - ../LaravelBackend:/var/www/html      # ← 同上，改成你的 Laravel 路徑
+    depends_on:
+      - mysql
+      - redis
+    restart: unless-stopped
+
+  # ─── MySQL - 資料庫 ────────────────────────────────────────────────
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root_secret
+      MYSQL_DATABASE: music_db
+      MYSQL_USER: music_user
+      MYSQL_PASSWORD: music_pass
+    volumes:
+      - mysql_data:/var/lib/mysql
+    restart: unless-stopped
+
+  # ─── Redis - 快取 / Queue / Session ───────────────────────────────
   redis:
     image: redis:alpine
+    container_name: redis
     ports:
       - "6379:6379"
-    container_name: redis
+    command: ["redis-server", "--requirepass", "misystemredis"]
+    restart: unless-stopped
 
+  # ─── Workerman - WebSocket Server ─────────────────────────────────
   workerman:
     build:
       context: .
+    container_name: workerman
     ports:
       - "2346:2346"
     volumes:
@@ -17,4 +66,7 @@ services:
     command: php ws-server.php start
     depends_on:
       - redis
-    container_name: workerman
+    restart: unless-stopped
+
+volumes:
+  mysql_data:

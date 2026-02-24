@@ -1,4 +1,6 @@
 <?php
+echo "[Init] ws-server.php is starting...\n";
+
 require __DIR__ . '/vendor/autoload.php';
 
 use Workerman\Worker;
@@ -12,7 +14,7 @@ $rooms            = []; // [ roomCode => [ connId => TcpConnection, ... ] ]
 $roomOwners       = []; // [ roomCode => ownerConnId ]
 $roomLastActive   = [];
 $roomIdleTimeout  = 3600;
-$connections      = [];
+$connections      = []; // 紀錄連接
 $usernames        = [];
 
 // 房間清理機制
@@ -22,7 +24,7 @@ $ws_worker->onWorkerStart = function() use (&$rooms, &$roomLastActive, $roomIdle
         foreach ($roomLastActive as $room => $last) {
             if (empty($rooms[$room]) || ($now - $last) > $roomIdleTimeout) {
                 unset($rooms[$room], $roomLastActive[$room]);
-                echo "[Cleanup] Room {$room} removed\n";
+                echo "[清理] 房間 {$room} 已被清除\n";
             }
         }
     });
@@ -30,7 +32,7 @@ $ws_worker->onWorkerStart = function() use (&$rooms, &$roomLastActive, $roomIdle
 
 // 新連線
 $ws_worker->onConnect = function(TcpConnection $conn) use (&$connections) {
-    echo "Client connected: {$conn->id}\n";
+    echo "新客戶端連接: {$conn->id}\n";
     $connections[$conn->id] = $conn;
     $conn->onWebSocketConnect = function($http_header) {
         header('Access-Control-Allow-Origin: *');
@@ -45,6 +47,38 @@ $ws_worker->onMessage = function(TcpConnection $conn, $raw) use (&$rooms, &$room
     $username = $msg['username'] ?? ('匿名_' . substr($conn->id, -4));
 
     switch ($action) {
+        case 'createRoom':
+            if (!$room) {
+                $conn->send(json_encode(['type' => 'error', 'message' => '房間代碼不可為空']));
+                return;
+            }
+
+            if (isset($rooms[$room])) {
+                $conn->send(json_encode(['type' => 'createFail', 'message' => '房間已存在']));
+                return;
+            }
+
+            // 建立房間
+            $rooms[$room] = [];
+            $roomOwners[$room] = $conn->id;
+            $roomLastActive[$room] = time();
+            $rooms[$room][$conn->id] = $conn;
+            $conn->room = $room;
+            $usernames[$conn->id] = $username;
+
+            $conn->send(json_encode([
+                'type' => 'createSuccess',
+                'room' => $room,
+                'username' => $username,
+                'isOwner' => true,
+            ]));
+
+            // 回傳目前房內所有使用者（只有自己）
+            $conn->send(json_encode(['type' => 'currentUsers', 'users' => [$username]]));
+
+            echo "[Create] Room {$room} created by {$conn->id}\n";
+            break;
+
         case 'joinRoom':
             if (!$room) {
                 $conn->send(json_encode(['type'=>'error', 'message'=>'Room code required']));
@@ -53,9 +87,8 @@ $ws_worker->onMessage = function(TcpConnection $conn, $raw) use (&$rooms, &$room
 
             // 不存在房間時自動建立
             if (!isset($rooms[$room])) {
-                $rooms[$room] = [];
-                $roomOwners[$room] = $conn->id;
-                echo "[AutoCreate] Room {$room} created\n";
+                $conn->send(json_encode(['type' => 'error', 'message' => '房間不存在']));
+                return;
             }
 
             $rooms[$room][$conn->id] = $conn;
@@ -96,6 +129,7 @@ $ws_worker->onMessage = function(TcpConnection $conn, $raw) use (&$rooms, &$room
                 unset($rooms[$room][$conn->id], $usernames[$conn->id]);
                 unset($conn->room);
                 $roomLastActive[$room] = time();
+                $conn->hasLeft = true; // ⬅️ 標記已手動離開
 
                 $conn->send(json_encode(['type'=>'leaveSuccess', 'room'=>$room]));
 
@@ -109,8 +143,22 @@ $ws_worker->onMessage = function(TcpConnection $conn, $raw) use (&$rooms, &$room
 
                 if (empty($rooms[$room]) || $roomOwners[$room] === $conn->id) {
                     unset($rooms[$room], $roomOwners[$room], $roomLastActive[$room]);
-                    echo "[Destroy] Room {$room} due to owner leave or empty\n";
+                    foreach ($rooms[$room] as $other) {
+                        $other->send(json_encode(['type' => 'info', 'message' => '房主已離開或房間已空，房間解散']));
+                    }
                 }
+            }
+            break;
+
+        case 'deleteRoom':
+            $room = $msg['room'] ?? null;
+            if ($room && $roomOwners[$room] === $conn->id) {
+                foreach ($rooms[$room] as $other) {
+                    $other->send(json_encode(['type'=>'info', 'message'=>'房間已被刪除']));
+                    $other->close();
+                }
+                unset($rooms[$room], $roomOwners[$room], $roomLastActive[$room]);
+                $conn->send(json_encode(['type'=>'deleteSuccess']));
             }
             break;
 
@@ -118,14 +166,16 @@ $ws_worker->onMessage = function(TcpConnection $conn, $raw) use (&$rooms, &$room
             $room = $conn->room ?? null;
             if ($room && isset($rooms[$room])) {
                 $roomLastActive[$room] = time();
-                $startTime = (int)((microtime(true) * 1000) + 5000);
+                $startTime = (int)(hrtime(true) / 1000000 + 5000); // ← 比 microtime 更穩定
 
                 foreach ($rooms[$room] as $other) {
-                    $other->send(json_encode([
-                        'type' => 'syncStart',
-                        'conn_id' => $conn->id,
-                        'sync_start_time' => $startTime,
-                    ]));
+                    // if ($other !== $conn) {
+                        $other->send(json_encode([
+                            'type' => 'syncStart',
+                            'conn_id' => $conn->id,
+                            'sync_start_time' => $startTime,
+                        ]));
+                    // }
                 }
             }
             break;
@@ -167,10 +217,16 @@ $ws_worker->onMessage = function(TcpConnection $conn, $raw) use (&$rooms, &$room
 
 // 連線關閉
 $ws_worker->onClose = function(TcpConnection $conn) use (&$rooms, &$roomOwners, &$roomLastActive, &$usernames) {
+    if (!empty($conn->hasLeft)) {
+        // 🛡️ 已處理過 leaveRoom，略過
+        return;
+    }
+
     $room = $conn->room ?? null;
     $name = $usernames[$conn->id] ?? null;
     if ($room && isset($rooms[$room][$conn->id])) {
         unset($rooms[$room][$conn->id], $usernames[$conn->id]);
+        unset($usernames[$conn->id]);
         $roomLastActive[$room] = time();
 
         foreach ($rooms[$room] as $other) {
@@ -189,4 +245,5 @@ $ws_worker->onClose = function(TcpConnection $conn) use (&$rooms, &$roomOwners, 
     echo "Client disconnected: {$conn->id}\n";
 };
 
+echo "[Run] Calling Worker::runAll()\n";
 Worker::runAll();
