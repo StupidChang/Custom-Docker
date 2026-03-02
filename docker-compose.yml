@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
 
-  # ─── Nginx - Web Server / Reverse Proxy ────────────────────────────
+  # ─── Nginx - Reverse Proxy ──────────────────────────────────────────
   nginx:
     image: nginx:alpine
     container_name: nginx
@@ -11,49 +11,82 @@ services:
       - "443:443"
     volumes:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - ../LaravelBackend:/var/www/html:ro   # ← 改成你的 Laravel 路徑
-      - ../VueFrontend/dist:/var/www/vue/dist:ro  # ← 改成你的 Vue dist 路徑
+      - ../starLaravel/starLaravel:/var/www/html:ro
     depends_on:
       - php-fpm
+      - nuxt
     restart: unless-stopped
 
-  # ─── PHP-FPM - 執行 Laravel ────────────────────────────────────────
+  # ─── PHP-FPM - Laravel API ──────────────────────────────────────────
   php-fpm:
     build:
       context: ./php
     container_name: php-fpm
     volumes:
-      - ../LaravelBackend:/var/www/html      # ← 同上，改成你的 Laravel 路徑
-    depends_on:
-      - mysql
-      - redis
-    restart: unless-stopped
-
-  # ─── MySQL - 資料庫 ────────────────────────────────────────────────
-  mysql:
-    image: mysql:8.0
-    container_name: mysql
-    ports:
-      - "3306:3306"
+      - ../starLaravel/starLaravel:/var/www/html
     environment:
-      MYSQL_ROOT_PASSWORD: root_secret
-      MYSQL_DATABASE: music_db
-      MYSQL_USER: music_user
-      MYSQL_PASSWORD: music_pass
-    volumes:
-      - mysql_data:/var/lib/mysql
+      - DB_CONNECTION=pgsql
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_DATABASE=${POSTGRES_DB:-music_db}
+      - DB_USERNAME=${POSTGRES_USER:-music_user}
+      - DB_PASSWORD=${POSTGRES_PASSWORD:-music_pass}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
     restart: unless-stopped
 
-  # ─── Redis - 快取 / Queue / Session ───────────────────────────────
+  # ─── Nuxt 前端 (SSR) ────────────────────────────────────────────────
+  nuxt:
+    build:
+      context: ../music-website
+      dockerfile: Dockerfile
+    container_name: nuxt
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - NUXT_API_BASE_URL=http://php-fpm:9000
+    depends_on:
+      - php-fpm
+    restart: unless-stopped
+
+  # ─── PostgreSQL - 取代 MySQL ─────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-music_db}
+      POSTGRES_USER: ${POSTGRES_USER:-music_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-music_pass}
+      # 設定 collation 支援中文搜尋
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-music_user} -d ${POSTGRES_DB:-music_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ─── Redis - 快取 / Queue / Session ─────────────────────────────────
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     container_name: redis
     ports:
       - "6379:6379"
-    command: ["redis-server", "--requirepass", "misystemredis"]
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-misystemredis}", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
     restart: unless-stopped
 
-  # ─── Workerman - WebSocket Server ─────────────────────────────────
+  # ─── Workerman - WebSocket Server ───────────────────────────────────
   workerman:
     build:
       context: .
@@ -68,5 +101,22 @@ services:
       - redis
     restart: unless-stopped
 
+  # ─── pgAdmin - PostgreSQL 管理介面（選用，dev 環境用）───────────────
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@mmatching.tw}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin_secret}
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    profiles:
+      - dev         # 只在 dev profile 啟動：docker compose --profile dev up
+    restart: unless-stopped
+
 volumes:
-  mysql_data:
+  postgres_data:
+  redis_data:
+  pgadmin_data:
