@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     libxml2-dev \
     libssl-dev \
     libpq-dev \
+    libonig-dev \
     unzip \
     curl \
     git \
