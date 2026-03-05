@@ -13,4 +13,4 @@ WORKDIR /app
 
 # 安裝套件（預設會從 volume 掛載 .）
 COPY composer.json ./
-RUN composer install
+RUN composer install 
