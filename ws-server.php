@@ -210,6 +210,14 @@ $ws_worker->onMessage = function(TcpConnection $conn, $raw) use (&$rooms, &$room
             }
             break;
 
+        case 'getServerTime':
+            $conn->send(json_encode([
+                'type' => 'serverTime',
+                'server_time' => (int)(hrtime(true) / 1000000), // ms
+                '_t0' => $msg['_t0'] ?? null,
+            ]));
+            break;
+
         default:
             $conn->send(json_encode(['type'=>'error', 'message'=>'Invalid action']));
     }
